@@ -263,7 +263,12 @@ def extract_topics(corpus: list[str], document_embeddings: np.ndarray, clusterer
     return topics
 
 @staticmethod
-def extract_topics_no_new_vocab_computation(corpus: list[str], vocab: list[str], document_embeddings: np.ndarray, clusterer: Clustering_and_DimRed, vocab_embeddings: np.ndarray, n_topwords: int = 2000, topword_extraction_methods: list[str] = ["tfidf", "cosine_similarity"], consider_outliers: bool = False) -> list[Topic]:
+def extract_topics_no_new_vocab_computation(corpus: list[str], vocab: list[str], 
+                                            document_embeddings: np.ndarray, 
+                                            clusterer: Clustering_and_DimRed, 
+                                            vocab_embeddings: np.ndarray, n_topwords: int = 2000, 
+                                            topword_extraction_methods: list[str] = ["tfidf", "cosine_similarity"], 
+                                            consider_outliers: bool = False) -> list[Topic]:
     """
     Extracts topics from the given corpus using the provided clusterer object on the document embeddings. 
     This version does not compute the vocabulary of the corpus and instead uses the provided vocabulary.

@@ -48,7 +48,9 @@ class TopicPrompting:
              enhancer: TopwordEnhancement = None,
              vocab: list = None,
              vocab_embeddings: dict = None,
-             random_state: int = 42):
+             random_state: int = 42,
+             openai_api_base: str = None,
+             openai_organization: str = None):
         """
         Initialize the object.
 
@@ -66,10 +68,24 @@ class TopicPrompting:
             vocab (list, optional): Vocabulary of the corpus (default is None).
             vocab_embeddings (dict, optional): Dictionary mapping words to their embeddings (default is None).
             random_state (int, optional): Random state for reproducibility (default is 42).
+            openai_api_base (str, optional): Base URL of the OpenAI API (default is None, which uses the default OpenAI API URL).
+            openai_organization (str, optional): Organization ID for the OpenAI API (default is None).
         """
 
         self.topic_lis = topic_lis
         self.openai_key = openai_key
+        openai.api_key = openai_key
+        
+        # Set custom API base URL if provided
+        if openai_api_base:
+            openai.api_base = openai_api_base
+        self.openai_api_base = openai_api_base
+        
+        # Set organization if provided
+        if openai_organization:
+            openai.organization = openai_organization
+        self.openai_organization = openai_organization
+        
         self.openai_prompting_model = openai_prompting_model
         self.max_context_length_promting = max_context_length_promting
         self.openai_model_temperature_prompting = openai_model_temperature_prompting

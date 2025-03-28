@@ -1,10 +1,14 @@
 import numpy as np
-import umap
-import hdbscan
 import matplotlib.pyplot as plt
 import pandas as pd
 import plotly.express as px
 import umap.plot
+try:
+    import cuml.manifold as umap
+    import cuml.cluster as hdbscan
+except ImportError:
+    import umap
+    import hdbscan
 from copy import deepcopy
 from sklearn.cluster import AgglomerativeClustering
 

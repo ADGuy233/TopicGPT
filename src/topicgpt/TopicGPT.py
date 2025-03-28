@@ -19,15 +19,14 @@ except:
     from TopicRepresentation import Topic
     import TopicRepresentation as TopicRepresentation
 
-embeddings_path= "SavedEmbeddings/embeddings.pkl" #global variable for the path to the embeddings
-
 class TopicGPT:
     """
     This is the main class for doing topic modelling with TopicGPT. 
     """
 
     def __init__(self,
-             openai_api_key: str,
+             api_key: str,
+             base_url: str = None,
              n_topics: int = None,
              openai_prompting_model: str = "gpt-3.5-turbo-16k",
              max_number_of_tokens: int = 16384,
@@ -42,15 +41,19 @@ class TopicGPT:
              n_topwords_description: int = 500,
              topword_extraction_methods: list[str] = ["tfidf", "cosine_similarity"],
              compute_vocab_hyperparams: dict = {},
+             embedding_hyperparams: dict = {},
              enhancer: TopwordEnhancement = None,
              topic_prompting: TopicPrompting = None,
-             verbose: bool = True) -> None:
+             verbose: bool = True,
+             openai_organization: str = None,
+             embeddings_path="SavedEmbeddings/embeddings.pkl") -> None:
         
         """
         Initializes the main class for conducting topic modeling with TopicGPT.
 
         Args:
-            openai_api_key (str): Your OpenAI API key. Obtain this key from https://beta.openai.com/account/api-keys.
+            api_key (str): Your OpenAI API key. Obtain this key from https://beta.openai.com/account/api-keys.
+            base_url (str, optional): Base URL of the OpenAI API (default is None, which uses the default OpenAI API URL).
             n_topics (int, optional): Number of topics to discover. If None, the Hdbscan algorithm (https://pypi.org/project/hdbscan/) is used to determine the number of topics automatically. Otherwise, agglomerative clustering is used. Note that with insufficient data, fewer topics may be found than specified.
             openai_prompting_model (str, optional): Model provided by OpenAI for topic description and prompts. Refer to https://platform.openai.com/docs/models for available models.
             max_number_of_tokens (int, optional): Maximum number of tokens to use for the OpenAI API.
@@ -68,12 +71,14 @@ class TopicGPT:
             enhancer (TopwordEnhancement, optional): Topword enhancement object. Used for describing topics. Find the class in the "TopwordEnhancement/TopwordEnhancement.py" folder. If None, a topword enhancement object with default parameters is used. If an openai model is specified here, it will overwrite the openai_prompting_model argument for topic description.
             topic_prompting (TopicPrompting, optional): Topic prompting object for formulating prompts. Find the class in the "TopicPrompting/TopicPrompting.py" folder. If None, a topic prompting object with default parameters is used. If an openai model is specified here, it will overwrite the openai_prompting_model argument for topic description.
             verbose (bool, optional): Whether to print detailed information about the process. This can be overridden by arguments in passed objects.
+            openai_organization (str, optional): Organization ID for the OpenAI API (default is None).
+            embeddings_path (str, optional): Path to save the embeddings. Default is "SavedEmbeddings/embeddings.pkl".
         """
         
 
 
         # Do some checks on the input arguments
-        assert openai_api_key is not None, "You need to provide an OpenAI API key."
+        assert api_key is not None, "You need to provide an OpenAI API key."
         assert n_topics is None or n_topics > 0, "The number of topics needs to be a positive integer."
         assert max_number_of_tokens > 0, "The maximum number of tokens needs to be a positive integer."
         assert max_number_of_tokens_embedding > 0, "The maximum number of tokens for the embedding model needs to be a positive integer."
@@ -82,7 +87,9 @@ class TopicGPT:
         assert len(topword_extraction_methods) > 0, "You need to provide at least one topword extraction method."
         assert n_topwords_description <= n_topwords, "The number of top words for the topic description needs to be smaller or equal to the number of top words."
 
-        self.openai_api_key = openai_api_key
+        self.openai_api_key = api_key
+        self.openai_api_base = base_url
+        self.openai_organization = openai_organization
         self.n_topics = n_topics
         self.openai_prompting_model = openai_prompting_model
         self.max_number_of_tokens = max_number_of_tokens
@@ -91,7 +98,14 @@ class TopicGPT:
         self.vocab_embeddings = vocab_embeddings
         self.embedding_model = embedding_model
         self.max_number_of_tokens_embedding = max_number_of_tokens_embedding
-        self.embedder = GetEmbeddingsOpenAI(api_key = self.openai_api_key, embedding_model = self.embedding_model, max_tokens = self.max_number_of_tokens_embedding)
+        self.embedder = GetEmbeddingsOpenAI(
+            api_key=self.openai_api_key, 
+            embedding_model=self.embedding_model, 
+            max_tokens=self.max_number_of_tokens_embedding,
+            api_base=self.openai_api_base,
+            organization=self.openai_organization,
+            **embedding_hyperparams
+        )
         self.clusterer = clusterer
         self.n_topwords = n_topwords
         self.n_topwords_description = n_topwords_description
@@ -101,14 +115,14 @@ class TopicGPT:
         self.topic_prompting = topic_prompting	
         self.use_saved_embeddings = use_saved_embeddings
         self.verbose = verbose
+        self.embeddings_path = embeddings_path
 
         self.compute_vocab_hyperparams["verbose"] = self.verbose
         
         # if embeddings have already been downloaded to the folder SavedEmbeddings, then load them
-        if self.use_saved_embeddings and os.path.exists(embeddings_path):
-            with open(embeddings_path, "rb") as f:
+        if self.use_saved_embeddings and os.path.exists(self.embeddings_path):
+            with open(self.embeddings_path, "rb") as f:
                 self.document_embeddings, self.vocab_embeddings = pickle.load(f)
-
 
         for elem in topword_extraction_methods:
             assert elem in ["tfidf", "cosine_similarity", "topword_enhancement"], "Invalid topword extraction method. Valid methods are 'tfidf', 'cosine_similarity', and 'topword_enhancement'."
@@ -119,10 +133,27 @@ class TopicGPT:
             self.n_topics = clusterer.number_clusters_hdbscan
         
         if enhancer is None:
-            self.enhancer = TopwordEnhancement(openai_key = self.openai_api_key, openai_model = self.openai_prompting_model, max_context_length = self.max_number_of_tokens, corpus_instruction = self.corpus_instruction)
+            self.enhancer = TopwordEnhancement(
+                openai_key=self.openai_api_key, 
+                openai_model=self.openai_prompting_model, 
+                max_context_length=self.max_number_of_tokens, 
+                corpus_instruction=self.corpus_instruction,
+                api_base=self.openai_api_base,
+            )
 
         if topic_prompting is None:
-            self.topic_prompting = TopicPrompting(topic_lis = [], openai_key = self.openai_api_key, openai_prompting_model = "gpt-3.5-turbo-16k",  max_context_length_promting = 16000, enhancer = self.enhancer, openai_embedding_model = self.embedding_model, max_context_length_embedding = self.max_number_of_tokens_embedding, corpus_instruction = corpus_instruction)
+            self.topic_prompting = TopicPrompting(
+                topic_lis=[], 
+                openai_key=self.openai_api_key, 
+                openai_prompting_model="gpt-3.5-turbo-16k",  
+                max_context_length_promting=16000, 
+                enhancer=self.enhancer, 
+                openai_embedding_model=self.embedding_model, 
+                max_context_length_embedding=self.max_number_of_tokens_embedding, 
+                corpus_instruction=corpus_instruction,
+                openai_api_base=self.openai_api_base,
+                openai_organization=self.openai_organization
+            )
         
         self.extractor = ExtractTopWords()
     
@@ -134,6 +165,7 @@ class TopicGPT:
         repr += "max_number_of_tokens: " + str(self.max_number_of_tokens) + "\n"
         repr += "corpus_instruction: " + self.corpus_instruction + "\n"
         repr += "embedding_model: " + self.embedding_model + "\n"
+        repr += "base_url: " + str(self.openai_api_base) + "\n"
         repr += "clusterer: " + str(self.clusterer) + "\n"
         repr += "n_topwords: " + str(self.n_topwords) + "\n"
         repr += "n_topwords_description: " + str(self.n_topwords_description) + "\n"
@@ -254,6 +286,9 @@ class TopicGPT:
             if verbose:
                 print("Computing embeddings...")
             self.compute_embeddings(corpus = self.corpus)
+            if self.use_saved_embeddings:
+                self.save_embeddings(self.embeddings_path)
+                print(f'embeddings saved to {self.embeddings_path}')
         
         if verbose: 
             print("Extracting topics...")
@@ -358,7 +393,7 @@ class TopicGPT:
         if return_function_result:
             return function_result
         
-    def save_embeddings(self, path: str = embeddings_path) -> None:
+    def save_embeddings(self, path) -> None:
         """
         Saves the document and vocabulary embeddings to a pickle file for later re-use.
 
@@ -376,4 +411,15 @@ class TopicGPT:
 
         with open(path, "wb") as f:
             pickle.dump([self.document_embeddings, self.vocab_embeddings], f)
+    
+    def save_model(self, path) -> None:
+        """
+        Saves the TopicGPT model to a pickle file for later re-use.
+
+        Args:
+            path (str): The path to save the model to.
+        """
+
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
 

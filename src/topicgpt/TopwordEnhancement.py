@@ -1,6 +1,6 @@
 import tiktoken
 import openai
-from typing import Callable
+from typing import Callable, Optional
 import numpy as np
 
 basic_instruction =  "You are a helpful assistant. You are excellent at inferring topics from top-words extracted via topic-modelling. You make sure that everything you output is strictly based on the provided text."
@@ -14,7 +14,9 @@ class TopwordEnhancement:
     max_context_length: int = 4000,
     openai_model_temperature: float = 0.5,
     basic_model_instruction: str = basic_instruction,
-    corpus_instruction: str = "") -> None:
+    corpus_instruction: str = "",
+    api_base: Optional[str] = None,
+    api_type: Optional[str] = None) -> None:
         """
         Initialize the OpenAIAssistant with the specified parameters.
 
@@ -25,6 +27,8 @@ class TopwordEnhancement:
             openai_model_temperature (float, optional): The softmax temperature to use for the OpenAI model (default is 0.5).
             basic_model_instruction (str, optional): The basic instruction for the model.
             corpus_instruction (str, optional): The instruction for the corpus. Useful if specific information on the corpus is available.
+            api_base (str, optional): The base URL for API requests (for OpenAI compatible endpoints).
+            api_type (str, optional): The type of API to use (for OpenAI compatible endpoints).
 
         Returns:
             None
@@ -42,6 +46,15 @@ class TopwordEnhancement:
         self.openai_model_temperature = openai_model_temperature
         self.basic_model_instruction = basic_model_instruction
         self.corpus_instruction = f" The following information is available about the corpus used to identify the topics: {corpus_instruction}"
+        self.api_base = api_base
+        self.api_type = api_type
+        
+        # 配置OpenAI客户端
+        openai.api_key = self.openai_key
+        if self.api_base:
+            openai.api_base = self.api_base
+        if self.api_type:
+            openai.api_type = self.api_type
 
     def __str__(self) -> str:
         repr = f"TopwordEnhancement(openai_model = {self.openai_model})"
@@ -61,7 +74,13 @@ class TopwordEnhancement:
         Returns:
             int: Number of tokens in the messages.
         """
-        encoding = tiktoken.encoding_for_model(self.openai_model)
+        try:
+            encoding = tiktoken.encoding_for_model(self.openai_model)
+        except KeyError:
+            # 处理无法自动映射到分词器的模型
+            print(f"无法自动映射模型 {self.openai_model} 到分词器。使用 cl100k_base 作为默认分词器。")
+            encoding = tiktoken.get_encoding("cl100k_base")
+            
         n_tokens = 0
         for message in messages: 
             for key, value in message.items():
@@ -94,25 +113,37 @@ class TopwordEnhancement:
 
         topwords = topwords[:n_words]
         topwords = np.array(topwords)
-    
+        
+        try:
+            encoding = tiktoken.encoding_for_model(self.openai_model)
+        except KeyError:
+            # 处理无法自动映射到分词器的模型
+            print(f"无法自动映射模型 {self.openai_model} 到分词器。使用 cl100k_base 作为默认分词器。")
+            encoding = tiktoken.get_encoding("cl100k_base")
 
         # if too many topwords are given, use only the first part of the topwords that fits into the context length
-        tokens_cumsum = np.cumsum([len(tiktoken.encoding_for_model(self.openai_model).encode(tw + ", ")) for tw in topwords]) + len(tiktoken.encoding_for_model(self.openai_model).encode(self.basic_model_instruction + " " + self.corpus_instruction))
+        tokens_cumsum = np.cumsum([len(encoding.encode(tw + ", ")) 
+                                   for tw in topwords]) + len(encoding.encode(self.basic_model_instruction + " " + self.corpus_instruction))
         if tokens_cumsum[-1] > self.max_context_length:
             print("Too many topwords given. Using only the first part of the topwords that fits into the context length. Number of topwords used: ", np.argmax(tokens_cumsum > self.max_context_length))
             n_words = np.argmax(tokens_cumsum > self.max_context_length)
             topwords = topwords[:n_words]
 
-
-
-        completion = openai.ChatCompletion.create(
-            model=self.openai_model,
-            messages=[
+        kwargs = {
+            "model": self.openai_model,
+            "messages": [
                 {"role": "system", "content":  self.basic_model_instruction + " " + self.corpus_instruction},
                 {"role": "user", "content": query_function(topwords)},
             ],
-            temperature = self.openai_model_temperature
-        )
+            "temperature": self.openai_model_temperature
+        }
+
+        client = openai.OpenAI(
+                api_key=self.openai_key,
+                base_url=self.api_base if self.api_base else None
+            )
+        
+        completion = client.chat.completions.create(**kwargs)
 
         return completion
     
@@ -133,7 +164,7 @@ class TopwordEnhancement:
         """
 
         completion = self.describe_topic_topwords_completion_object(topwords, n_words, query_function)
-        return completion.choices[0].message["content"]
+        return completion.choices[0].message.content
     
     def generate_topic_name_str(self,
                             topwords: list[str],
@@ -184,24 +215,42 @@ class TopwordEnhancement:
             new_doc_lis.append(" ".join(doc))
         documents = new_doc_lis
 
+        try:
+            encoding = tiktoken.encoding_for_model(self.openai_model)
+        except KeyError:
+            # 处理无法自动映射到分词器的模型
+            print(f"无法自动映射模型 {self.openai_model} 到分词器。使用 cl100k_base 作为默认分词器。")
+            encoding = tiktoken.get_encoding("cl100k_base")
+
         # if too many documents are given, use only the first part of the documents that fits into the context length
-        tokens_cumsum = np.cumsum([len(tiktoken.encoding_for_model(self.openai_model).encode(doc + ", ")) for doc in documents]) + len(tiktoken.encoding_for_model(self.openai_model).encode(self.basic_model_instruction + " " + self.corpus_instruction))
+        tokens_cumsum = np.cumsum([len(encoding.encode(doc + ", ")) for doc in documents]) + len(encoding.encode(self.basic_model_instruction + " " + self.corpus_instruction))
         if tokens_cumsum[-1] > self.max_context_length:
             print("Too many documents given. Using only the first part of the documents that fits into the context length. Number of documents used: ", np.argmax(tokens_cumsum > self.max_context_length))
             n_documents = np.argmax(tokens_cumsum > self.max_context_length)
             documents = documents[:n_documents]
         
-        completion = openai.ChatCompletion.create(
-            model=self.openai_model,
-            messages=[
+        kwargs = {
+            "model": self.openai_model,
+            "messages": [
                 {"role": "system", "content": self.basic_model_instruction + " " + self.corpus_instruction},
                 {"role": "user", "content": query_function(documents)},
             ],
-            temperature = self.openai_model_temperature
-        )
+            "temperature": self.openai_model_temperature
+        }
+        
+        try:
+            # 尝试使用新版API客户端
+            client = openai.OpenAI(
+                api_key=self.openai_key,
+                base_url=self.api_base if self.api_base else None
+            )
+            completion = client.chat.completions.create(**kwargs)
+        except Exception as e:
+            print(f"使用新版API客户端失败: {e}，尝试使用旧版API")
+            # 使用旧版API
+            completion = openai.ChatCompletion.create(**kwargs)
 
         return completion
-    
     
     @staticmethod
     def sample_identity(n_docs: int) -> np.ndarray:
@@ -305,5 +354,5 @@ class TopwordEnhancement:
             str: A description of the topic by the model in the form of a string.
         """
 
-        completion = self.describe_topic_document_sampling_completion_object(documents, truncate_doc_thresh, n_documents, query_function, sampling_strategy)
-        return completion.choices[0].message["content"]
+        completion = self.describe_topic_documents_sampling_completion_object(documents, truncate_doc_thresh, n_documents, query_function, sampling_strategy)
+        return completion.choices[0].message.content

@@ -103,7 +103,8 @@ class ExtractTopWords:
                         verbose: bool = True,
                         min_doc_frequency: int = 3,
                         min_freq: float = 0.1,
-                        max_freq: float = 0.9) -> list[str]:
+                        max_freq: float = 0.9,
+                        is_chinese: bool = True) -> list[str]:
         """
         Compute the vocabulary of the corpus and perform preprocessing of the corpus.
 
@@ -119,6 +120,7 @@ class ExtractTopWords:
             min_doc_frequency (int, optional): Minimum number of documents a word should appear in to be considered in the vocabulary.
             min_freq (float, optional): Minimum frequency percentile of words to be considered in the vocabulary.
             max_freq (float, optional): Maximum frequency percentile of words to be considered in the vocabulary.
+            is_chinese (bool, optional): Whether the corpus is in Chinese (space-separated Chinese characters).
 
         Returns:
             list[str]: List of words in the corpus sorted alphabetically.
@@ -130,22 +132,42 @@ class ExtractTopWords:
         doc_frequency = collections.defaultdict(set)
 
         for doc_id, doc in enumerate(tqdm(corpus, disable=not verbose, desc="Processing corpus")):
-            words = nltk.word_tokenize(doc)
-            for word in words:
-                if remove_punction and word in string.punctuation:
-                    continue
-                if remove_stopwords and word.lower() in stopwords:
-                    continue
-                if remove_numbers and re.search(r'\d', word):  # use a regular expression to check for digits
-                    continue
-                if not re.search('[a-zA-Z]', word):  # checks if word contains at least one alphabetic character
-                    continue
-                # remove words that do not begin with an alphabetic character
-                if not word[0].isalpha():
-                    continue
-                if len(word) > max_word_length or (remove_short_words and len(word) < min_word_length):
-                    continue
+            # 处理中文和英文分词的不同逻辑
+            if is_chinese:
+                # 对于中文，假设文本已经是空格分隔的，直接按空格分割
+                words = doc.split()
+            else:
+                # 对于英文，使用nltk的分词器
+                words = nltk.word_tokenize(doc)
                 
+            for word in words:
+                # 中文字符处理逻辑
+                if is_chinese:
+                    # 中文标点符号处理
+                    if remove_punction and any(p in word for p in string.punctuation + '，。！？；：""''【】《》「」（）、'):
+                        continue
+                    if remove_short_words and len(word) < min_word_length and not any('\u4e00' <= char <= '\u9fff' for char in word):
+                        continue
+                    # 中文词语长度通常比英文短，可能需要调整长度要求
+                    if len(word) > max_word_length:
+                        continue
+                else:
+                    # 英文处理逻辑
+                    if remove_punction and word in string.punctuation:
+                        continue
+                    if remove_stopwords and word.lower() in stopwords:
+                        continue
+                    if remove_numbers and re.search(r'\d', word):  # use a regular expression to check for digits
+                        continue
+                    if not re.search('[a-zA-Z]', word):  # checks if word contains at least one alphabetic character
+                        continue
+                    # remove words that do not begin with an alphabetic character
+                    if not word[0].isalpha():
+                        continue
+                    if len(word) > max_word_length or (remove_short_words and len(word) < min_word_length):
+                        continue
+                
+                # 无论中英文，统一存储小写形式
                 word_lower = word.lower()
                 word_counter[word_lower] += 1
                 doc_frequency[word_lower].add(doc_id)
@@ -164,13 +186,6 @@ class ExtractTopWords:
         min_freq_value = np.quantile(freq_arr, min_freq, method="lower")
         max_freq_value = np.quantile(freq_arr, max_freq, method="higher")
         
-
-        vocab = {}
-
-        for word in freq_counter.keys():
-            if min_freq_value <= freq_counter[word] <= max_freq_value and len(doc_frequency[word]) >= min_doc_frequency:
-                vocab[word] = freq_counter[word]
-
         vocab = {word for word in freq_counter.keys() 
                 if min_freq_value <= freq_counter[word] <= max_freq_value 
                 and len(doc_frequency[word]) >= min_doc_frequency}
@@ -427,3 +442,9 @@ class ExtractTopWords:
                 top_word_scores[topic] = [similarity_mat[word_idx, topic] for word_idx in np.argsort(-similarity_mat[:, topic])[:top_n_words]]
 
         return top_words, top_word_scores
+
+if __name__=='__main__':
+    corpus = ['招聘 性别文化 性别歧视 热点话题 平权', '语言 汉语 语文 中文系 现代汉语', 
+              '中国人 外国人 对外汉语 中文翻译']
+    et = ExtractTopWords()
+    print(et.compute_corpus_vocab(corpus, min_freq=0, min_doc_frequency=0))

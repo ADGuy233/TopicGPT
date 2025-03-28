@@ -1,15 +1,17 @@
-import openai
-from openai.embeddings_utils import get_embedding
 import tiktoken
 from tqdm import tqdm
 import numpy as np
+from openai import OpenAI, APIError
 
 class GetEmbeddingsOpenAI:
     """
     This class allows to compute embeddings of text using the OpenAI API.
     """
 
-    def __init__(self, api_key: str, embedding_model: str = "text-embedding-ada-002", tokenizer: str = None, max_tokens: int = 8191) -> None:
+    def __init__(self, api_key: str, embedding_model: str = "text-embedding-ada-002", 
+                 tokenizer: str = 'cl100k_base', max_tokens: int = 8191, 
+                 api_base: str = None, organization: str = None, num_workers: int = 10,
+                 ) -> None:
         """
         Constructor of the class.
 
@@ -18,19 +20,28 @@ class GetEmbeddingsOpenAI:
             embedding_model (str, optional): Name of the embedding model to use.
             tokenizer (str, optional): Name of the tokenizer to use.
             max_tokens (int, optional): Maximum number of tokens to use.
+            api_base (str, optional): Base URL of the API. Use this to connect to OpenAI-compatible APIs.
+            organization (str, optional): Organization ID for the API.
+            num_workers (int, optional): Maximum number of worker threads to use for parallel processing.
 
         Note:
             By default, the embedding model "text-embedding-ada-002" is used with the corresponding tokenizer "cl100k_base" and a maximum number of tokens of 8191.
         """
 
         self.api_key = api_key
-        openai.api_key = api_key
-        self.embedding_model = embedding_model
-
-        self.tokenizer_str = tokenizer
         
-    
+        # 创建 OpenAI 客户端
+        client_kwargs = {"api_key": api_key}
+        if api_base:
+            client_kwargs["base_url"] = api_base
+        if organization:
+            client_kwargs["organization"] = organization
+            
+        self.client = OpenAI(**client_kwargs)
+        self.embedding_model = embedding_model
+        self.tokenizer_str = tokenizer
         self.max_tokens = max_tokens
+        self.worker = num_workers
 
     @staticmethod
     def num_tokens_from_string(string: str, encoding) -> int:
@@ -127,60 +138,83 @@ class GetEmbeddingsOpenAI:
         Returns:
             API response: The response from the API.
         """
-        response = openai.Embedding.create(input = [text], model = self.embedding_model)
+        response = self.client.embeddings.create(
+            input=[text], 
+            model=self.embedding_model
+        )
         return response
 
-
-    
-    def get_embeddings_doc_split(self, corpus: list[list[str]], n_tries=3) -> list[dict]:
+    def get_embeddings_doc_split(self, corpus: list[list[str]], n_tries=3, num_workers=10) -> list[dict]:
         """
-        Computes the embeddings of a corpus for split documents.
+        Computes the embeddings of a corpus for split documents in parallel.
 
         Args:
             self: The instance of the class.
             corpus (list[list[str]]): List of strings to embed, where each element is a document represented by a list of its chunks.
             n_tries (int, optional): Number of tries to make an API call (default is 3).
+            num_workers (int, optional): Maximum number of worker threads (default is 10).
 
         Returns:
             List[dict]: A list of dictionaries, where each dictionary contains the embedding of the document, the text of the document, and a list of errors that occurred during the embedding process.
         """
-
-        api_res_list = [] 
-        for i in tqdm(range(len(corpus))):
+        import concurrent.futures
+        
+        def process_chunk(chunk_info):
+            doc_idx, chunk_idx, chunk = chunk_info
+            for j in range(n_tries + 1):
+                try: 
+                    api_res = self.make_api_call(chunk)
+                    return (doc_idx, chunk_idx, {"api_res": api_res, "error": None})
+                except Exception as e:
+                    print(f"Error {e} occurred for chunk {chunk_idx} of document {doc_idx}")
+                    print(chunk)
+                    print("Trying again.")
+                    if j == n_tries: 
+                        print("Maximum number of tries reached. Skipping chunk.")
+                        return (doc_idx, chunk_idx, {"api_res": None, "error": e})
+        
+        # Prepare flat list of chunks with their indices
+        all_chunks = []
+        for i, chunk_list in enumerate(corpus):
+            for j, chunk in enumerate(chunk_list):
+                all_chunks.append((i, j, chunk))
+        
+        # Process chunks in parallel
+        chunk_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_chunk = {executor.submit(process_chunk, chunk_info): chunk_info for chunk_info in all_chunks}
+            for future in tqdm(concurrent.futures.as_completed(future_to_chunk), total=len(all_chunks)):
+                doc_idx, chunk_idx, result = future.result()
+                if doc_idx not in chunk_results:
+                    chunk_results[doc_idx] = {}
+                chunk_results[doc_idx][chunk_idx] = result
+        
+        # Aggregate results by document
+        api_res_list = []
+        for i in range(len(corpus)):
+            if i not in chunk_results:
+                api_res_list.append({"embedding": None, "text": "", "errors": ["Document processing failed"]})
+                continue
+                
             chunk_lis = corpus[i]
-            api_res_doc = []
-            for chunk_n, chunk in enumerate(chunk_lis):
-
-                for i in range(n_tries + 1):
-                    try: 
-                        api_res_doc.append(
-                            {"api_res": self.make_api_call(chunk), 
-                            "error": None }
-                         )
-                        break
-                    except Exception as e:
-                            print(f"Error {e} occured for chunk {chunk_n} of document {i}")
-                            print(chunk)
-                            print("Trying again.")
-                            if i == n_tries: 
-                                print("Maximum number of tries reached. Skipping chunk.")
-                                api_res_doc.append(
-                                    {"api_res": None, 
-                                    "error": e })
-                        
-
-            # average the embeddings of the chunks
-            emb_lis = []
-            for api_res in api_res_doc:
-                if api_res["api_res"] is not None:
-                    emb_lis.append(np.array(api_res["api_res"]["data"][0]["embedding"]))
             text = " ".join(chunk_lis)
-            embedding = np.mean(emb_lis, axis = 0)
-            api_res_list.append(
-                {"embedding": embedding, 
+            
+            # Extract and aggregate embeddings
+            emb_lis = []
+            errors = []
+            for j in range(len(chunk_lis)):
+                result = chunk_results[i].get(j, {"api_res": None, "error": "Missing chunk result"})
+                if result["api_res"] is not None:
+                    emb_lis.append(np.array(result["api_res"].data[0].embedding))
+                errors.append(result["error"])
+                
+            embedding = np.mean(emb_lis, axis=0) if emb_lis else None
+            api_res_list.append({
+                "embedding": embedding, 
                 "text": text, 
-                "errors": [api_res["error"] for api_res in api_res_doc]}
-                )
+                "errors": errors
+            })
+            
         return api_res_list
     
     def convert_api_res_list(self, api_res_list: list[dict]) -> dict:
@@ -215,7 +249,7 @@ class GetEmbeddingsOpenAI:
         """
 
         corpus_split = self.split_long_docs(corpus)
-        corpus_emb = self.get_embeddings_doc_split(corpus_split)
+        corpus_emb = self.get_embeddings_doc_split(corpus_split, num_workers=self.worker)
         self.corpus_emb = corpus_emb
         res = self.convert_api_res_list(corpus_emb)
         return res
